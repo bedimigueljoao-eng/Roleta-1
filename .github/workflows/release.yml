@@ -61,12 +61,12 @@ jobs:
 
       - name: Install dependencies & build dist
         run: |
-          npm install --no-audit --no-fund
+          npm install --legacy-peer-deps --no-audit --no-fund
           npm run build
 
       - name: Bootstrap Capacitor Android & Build APK
         run: |
-          npm install --no-save --no-audit --no-fund @capacitor/core@^6.2.0 @capacitor/cli@^6.2.0 @capacitor/android@^6.2.0
+          npm install --no-save --legacy-peer-deps --no-audit --no-fund @capacitor/core@^6.2.0 @capacitor/cli@^6.2.0 @capacitor/android@^6.2.0
           npx cap add android
           npx cap sync android
           cd android
