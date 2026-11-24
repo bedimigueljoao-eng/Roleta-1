@@ -1,0 +1,10 @@
+{
+  "appId": "com.roletalab.app",
+  "appName": "RoletaLab",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#0B0F17"
+  }
+}

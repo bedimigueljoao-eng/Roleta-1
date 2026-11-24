@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   Square,
 } from 'lucide-react';
+import { AppInstallAndGitHubControls } from './components/AppInstallAndGitHubModal';
 import { CaptureOcrStudio } from './components/CaptureOcrStudio';
 import { EuropeanBettingMat } from './components/EuropeanBettingMat';
 import { EuropeanWheelSvg } from './components/EuropeanWheelSvg';
@@ -695,6 +696,7 @@ export default function App() {
               <RotateCcw className="w-3.5 h-3.5" />
               Nova Mesa
             </button>
+            <AppInstallAndGitHubControls />
           </div>
         </div>
       </div>
