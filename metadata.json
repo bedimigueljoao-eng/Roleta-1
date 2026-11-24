@@ -1,0 +1,6 @@
+{
+  "name": "RoletaLab — Análise Quantitativa & OCR de Roleta Europeia",
+  "description": "Plataforma dedicada à análise estatística, captura de ecrã com OCR de baixa latência, reconciliação temporal, detetor de entropia e gestão de banca para Roleta Europeia (0–36).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
