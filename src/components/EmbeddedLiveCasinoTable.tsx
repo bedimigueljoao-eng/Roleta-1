@@ -15,6 +15,7 @@ interface EmbeddedLiveCasinoTableProps {
   currency: CurrencyCode;
   casinoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   onBetSettled?: (stake: number, payout: number, outcomeNum: number) => void;
+  roiOverlaySlot?: React.ReactNode;
 }
 
 type BetTargetKey =
@@ -38,6 +39,7 @@ export const EmbeddedLiveCasinoTable: React.FC<EmbeddedLiveCasinoTableProps> = (
   currency,
   casinoCanvasRef,
   onBetSettled,
+  roiOverlaySlot,
 }) => {
   const [stripNumbers, setStripNumbers] = useState<number[]>(INITIAL_STRIP);
   const [selectedChip, setSelectedChip] = useState<number>(1000);
@@ -251,11 +253,12 @@ export const EmbeddedLiveCasinoTable: React.FC<EmbeddedLiveCasinoTableProps> = (
   return (
     <div className="w-full h-full flex flex-col bg-[#080C14] text-slate-100 overflow-y-auto">
       {/* Live Casino History Strip Canvas (OCR reads this exact region via ROI) */}
-      <div className="w-full border-b border-slate-800/90 bg-[#080C14]">
+      <div className="relative w-full border-b border-slate-800/90 bg-[#080C14]">
         <canvas
           ref={casinoCanvasRef}
           className="w-full h-[96px] sm:h-[112px] block object-fill"
         />
+        {roiOverlaySlot}
       </div>
 
       {/* Interactive Casino Betting Area inside Embedded Browser */}

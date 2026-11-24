@@ -6,21 +6,26 @@ import {
   ExternalLink,
   Eye,
   Globe,
+  Move,
+  Pipette,
   RotateCw,
   X,
 } from 'lucide-react';
+import { calibrateProfileFromPixel, rgbToHsv } from '../ocr/hsvColorClassifier';
 import {
   CasinoLayoutPreset,
   CurrencyCode,
   OCRFrameResult,
   ROIRect,
+  RouletteColor,
 } from '../types/roulette';
 import { EmbeddedLiveCasinoTable } from './EmbeddedLiveCasinoTable';
 
 export const BUILTIN_TABLE_URL = 'mesa://europeia-ao-vivo';
+export const KWANZABET_URL = 'https://m.kwanzabet.ao';
 
 type SplitHeightPct = 45 | 56 | 66;
-type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | null;
+type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'w' | 'e' | null;
 
 interface SplitScreenBrowserProps {
   isOpen: boolean;
@@ -30,11 +35,14 @@ interface SplitScreenBrowserProps {
   isOcrActive: boolean;
   onToggleOcr: () => void;
   onStartExternalScreenCapture: () => Promise<void>;
+  onStopScreenCapture: () => void;
   onUpdatePreset: (updated: CasinoLayoutPreset) => void;
+  roi: ROIRect;
+  onChangeRoi: (roi: ROIRect) => void;
   lastFrameResult: OCRFrameResult | null;
   embeddedCasinoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
-  screenVideoRef: React.RefObject<HTMLVideoElement | null>;
-  hasScreenStream: boolean;
+  browserVideoRef: React.RefObject<HTMLVideoElement | null>;
+  mediaStream: MediaStream | null;
   onUrlModeChange: (isBuiltIn: boolean) => void;
   onBetSettled?: (stake: number, payout: number, outcomeNum: number) => void;
 }
@@ -68,11 +76,14 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
   isOcrActive,
   onToggleOcr,
   onStartExternalScreenCapture,
+  onStopScreenCapture,
   onUpdatePreset,
+  roi,
+  onChangeRoi,
   lastFrameResult,
   embeddedCasinoCanvasRef,
-  screenVideoRef,
-  hasScreenStream,
+  browserVideoRef,
+  mediaStream,
   onUrlModeChange,
   onBetSettled,
 }) => {
@@ -82,15 +93,24 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
   const [addressInput, setAddressInput] = useState<string>(BUILTIN_TABLE_URL);
   const [reloadNonce, setReloadNonce] = useState<number>(0);
   const [isLoadingExternal, setIsLoadingExternal] = useState<boolean>(false);
-  const [externalErrorMsg, setExternalErrorMsg] = useState<string | null>(null);
+  const [externalNotice, setExternalNotice] = useState<string | null>(null);
   const [showMira, setShowMira] = useState<boolean>(true);
+  const [showRoiPrecisionBar, setShowRoiPrecisionBar] = useState<boolean>(true);
   const [showDebugBoxes, setShowDebugBoxes] = useState<boolean>(true);
+  const [eyedropperTarget, setEyedropperTarget] = useState<RouletteColor | null>(null);
+  const [lastHsvSample, setLastHsvSample] = useState<string | null>(null);
+  const [videoAspectRatio, setVideoAspectRatio] = useState<number>(16 / 9);
+
   const [recentBookmarks, setRecentBookmarks] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('roletalab_browser_bookmarks_v1');
-      return saved ? (JSON.parse(saved) as string[]) : [];
+      const parsed = saved ? (JSON.parse(saved) as string[]) : [];
+      if (!parsed.includes(KWANZABET_URL)) {
+        return [KWANZABET_URL, ...parsed].slice(0, 5);
+      }
+      return parsed;
     } catch {
-      return [];
+      return [KWANZABET_URL];
     }
   });
 
@@ -100,30 +120,53 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
     startX: number;
     startY: number;
     startRoi: ROIRect;
+    containerWidth: number;
+    containerHeight: number;
   } | null>(null);
 
   const currentUrl = historyStack[historyIndex] ?? BUILTIN_TABLE_URL;
   const isBuiltInTable = currentUrl === BUILTIN_TABLE_URL;
+  const hasStream = mediaStream !== null;
 
   useEffect(() => {
     onUrlModeChange(isBuiltInTable);
   }, [isBuiltInTable, onUrlModeChange]);
 
-  // Adjust default ROI to cleanly frame the top strip inside the built-in table
+  // Attach MediaStream directly to the visible video element inside the Split-Screen Browser
   useEffect(() => {
-    if (isBuiltInTable && activePreset.roi.topRatio > 0.1) {
-      // Only auto-adjust if user hasn't moved it onto the top strip bar
+    const videoEl = browserVideoRef.current;
+    if (!videoEl) return;
+    if (mediaStream) {
+      videoEl.srcObject = mediaStream;
+      void videoEl.play().catch(() => {
+        // Autoplay handled by muted + playsInline
+      });
+    } else {
+      videoEl.srcObject = null;
     }
-  }, [isBuiltInTable, activePreset.roi.topRatio]);
+  }, [mediaStream, browserVideoRef, isBuiltInTable]);
+
+  // Show helpful fallback notice when navigating to external casino URLs
+  useEffect(() => {
+    if (isBuiltInTable || hasStream) {
+      setIsLoadingExternal(false);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setIsLoadingExternal(false);
+    }, 2500);
+    return () => window.clearTimeout(t);
+  }, [isBuiltInTable, hasStream, currentUrl, reloadNonce]);
 
   const navigateToUrl = (rawUrl: string) => {
     const safe = sanitizeBrowserUrl(rawUrl);
     if (!safe) {
-      setExternalErrorMsg('URL inválido. Utilize apenas endereços https://, http:// ou mesa://europeia-ao-vivo.');
+      setExternalNotice(
+        'URL inválido. Utilize apenas endereços https://, http:// ou mesa://europeia-ao-vivo.'
+      );
       return;
     }
 
-    setExternalErrorMsg(null);
     setAddressInput(safe);
 
     const nextStack = [...historyStack.slice(0, historyIndex + 1), safe];
@@ -132,6 +175,9 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
 
     if (safe !== BUILTIN_TABLE_URL) {
       setIsLoadingExternal(true);
+      setExternalNotice(
+        'Casas de apostas (como m.kwanzabet.ao) costumam bloquear iframes em navegadores desktop via X-Frame-Options/Cloudflare. Se não carregar abaixo, use os 2 passos ao lado.'
+      );
       setRecentBookmarks((prev) => {
         const next = [safe, ...prev.filter((u) => u !== safe)].slice(0, 5);
         try {
@@ -142,6 +188,10 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
         return next;
       });
     } else {
+      if (hasStream) {
+        onStopScreenCapture();
+      }
+      setExternalNotice(null);
       setIsLoadingExternal(false);
     }
   };
@@ -152,75 +202,75 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
     setHistoryIndex(prevIdx);
     const target = historyStack[prevIdx];
     setAddressInput(target);
-    setExternalErrorMsg(null);
+    setExternalNotice(null);
     setIsLoadingExternal(target !== BUILTIN_TABLE_URL);
   };
 
   const handleReload = () => {
-    setExternalErrorMsg(null);
+    setExternalNotice(null);
     setReloadNonce((n) => n + 1);
     if (!isBuiltInTable) {
       setIsLoadingExternal(true);
     }
   };
 
-  // Interactive ROI Dragging over the Embedded Browser Viewport
+  // Interactive ROI Drag & 8-handle Resize over the Browser / Video / Strip Viewport
   const startRoiDrag = (e: React.PointerEvent, handle: DragHandle) => {
-    if (!showMira) return;
+    if (!showMira || eyedropperTarget !== null) return;
     e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const targetEl = e.currentTarget as HTMLElement;
+    targetEl.setPointerCapture(e.pointerId);
+    const roiBoxEl = handle === 'move' ? targetEl : targetEl.parentElement;
+    const containerEl = roiBoxEl?.parentElement ?? viewportRef.current;
+    const rect = containerEl?.getBoundingClientRect();
     dragStateRef.current = {
       handle,
       startX: e.clientX,
       startY: e.clientY,
-      startRoi: { ...activePreset.roi },
+      startRoi: { ...roi },
+      containerWidth: Math.max(100, rect?.width ?? 600),
+      containerHeight: Math.max(40, rect?.height ?? 200),
     };
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     const drag = dragStateRef.current;
-    const vp = viewportRef.current;
-    if (!drag || !vp) return;
+    if (!drag) return;
 
-    const rect = vp.getBoundingClientRect();
-    const dx = (e.clientX - drag.startX) / rect.width;
-    const dy = (e.clientY - drag.startY) / rect.height;
+    const dx = (e.clientX - drag.startX) / drag.containerWidth;
+    const dy = (e.clientY - drag.startY) / drag.containerHeight;
     const s = drag.startRoi;
     const next: ROIRect = { ...s };
+    const minW = 0.08;
+    const minH = 0.05;
 
     if (drag.handle === 'move') {
       next.leftRatio = Math.max(0, Math.min(1 - s.widthRatio, s.leftRatio + dx));
       next.topRatio = Math.max(0, Math.min(1 - s.heightRatio, s.topRatio + dy));
-    } else if (drag.handle === 'nw') {
-      const newL = Math.max(0, Math.min(s.leftRatio + s.widthRatio - 0.1, s.leftRatio + dx));
-      const newT = Math.max(0, Math.min(s.topRatio + s.heightRatio - 0.05, s.topRatio + dy));
-      next.widthRatio = s.widthRatio + (s.leftRatio - newL);
-      next.heightRatio = s.heightRatio + (s.topRatio - newT);
-      next.leftRatio = newL;
-      next.topRatio = newT;
-    } else if (drag.handle === 'ne') {
-      const newT = Math.max(0, Math.min(s.topRatio + s.heightRatio - 0.05, s.topRatio + dy));
-      next.widthRatio = Math.max(0.1, Math.min(1 - s.leftRatio, s.widthRatio + dx));
-      next.heightRatio = s.heightRatio + (s.topRatio - newT);
-      next.topRatio = newT;
-    } else if (drag.handle === 'sw') {
-      const newL = Math.max(0, Math.min(s.leftRatio + s.widthRatio - 0.1, s.leftRatio + dx));
-      next.widthRatio = s.widthRatio + (s.leftRatio - newL);
-      next.leftRatio = newL;
-      next.heightRatio = Math.max(0.05, Math.min(1 - s.topRatio, s.heightRatio + dy));
-    } else if (drag.handle === 'se') {
-      next.widthRatio = Math.max(0.1, Math.min(1 - s.leftRatio, s.widthRatio + dx));
-      next.heightRatio = Math.max(0.05, Math.min(1 - s.topRatio, s.heightRatio + dy));
+    } else {
+      if (drag.handle === 'nw' || drag.handle === 'sw' || drag.handle === 'w') {
+        const newL = Math.max(0, Math.min(s.leftRatio + s.widthRatio - minW, s.leftRatio + dx));
+        next.widthRatio = s.widthRatio + (s.leftRatio - newL);
+        next.leftRatio = newL;
+      }
+      if (drag.handle === 'ne' || drag.handle === 'se' || drag.handle === 'e') {
+        next.widthRatio = Math.max(minW, Math.min(1 - s.leftRatio, s.widthRatio + dx));
+      }
+      if (drag.handle === 'nw' || drag.handle === 'ne' || drag.handle === 'n') {
+        const newT = Math.max(0, Math.min(s.topRatio + s.heightRatio - minH, s.topRatio + dy));
+        next.heightRatio = s.heightRatio + (s.topRatio - newT);
+        next.topRatio = newT;
+      }
+      if (drag.handle === 'sw' || drag.handle === 'se' || drag.handle === 's') {
+        next.heightRatio = Math.max(minH, Math.min(1 - s.topRatio, s.heightRatio + dy));
+      }
     }
 
-    onUpdatePreset({
-      ...activePreset,
-      roi: {
-        leftRatio: Number(next.leftRatio.toFixed(4)),
-        topRatio: Number(next.topRatio.toFixed(4)),
-        widthRatio: Number(next.widthRatio.toFixed(4)),
-        heightRatio: Number(next.heightRatio.toFixed(4)),
-      },
+    onChangeRoi({
+      leftRatio: Number(next.leftRatio.toFixed(4)),
+      topRatio: Number(next.topRatio.toFixed(4)),
+      widthRatio: Number(next.widthRatio.toFixed(4)),
+      heightRatio: Number(next.heightRatio.toFixed(4)),
     });
   };
 
@@ -228,16 +278,72 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
     dragStateRef.current = null;
   };
 
-  // For built-in table, the strip canvas sits in the top ~112px (~26% of browser height)
-  // Keep ROI overlay relative to the full viewport (or strip canvas in built-in mode)
-  const overlayRoi: ROIRect = isBuiltInTable
-    ? {
-        leftRatio: 0.015,
-        topRatio: 0.06,
-        widthRatio: 0.97,
-        heightRatio: 0.2,
-      }
-    : activePreset.roi;
+  // Eyedropper directly on the live captured video or built-in canvas
+  const handleEyedropperClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!eyedropperTarget) return;
+
+    let r = 0;
+    let g = 0;
+    let b = 0;
+
+    if (hasStream && browserVideoRef.current && browserVideoRef.current.videoWidth > 0) {
+      const v = browserVideoRef.current;
+      const vrect = v.getBoundingClientRect();
+      const rx = Math.min(1, Math.max(0, (e.clientX - vrect.left) / Math.max(1, vrect.width)));
+      const ry = Math.min(1, Math.max(0, (e.clientY - vrect.top) / Math.max(1, vrect.height)));
+      const tmp = document.createElement('canvas');
+      tmp.width = v.videoWidth;
+      tmp.height = v.videoHeight;
+      const tctx = tmp.getContext('2d');
+      if (!tctx) return;
+      tctx.drawImage(v, 0, 0);
+      const px = Math.min(v.videoWidth - 1, Math.max(0, Math.round(rx * v.videoWidth)));
+      const py = Math.min(v.videoHeight - 1, Math.max(0, Math.round(ry * v.videoHeight)));
+      const d = tctx.getImageData(px, py, 1, 1).data;
+      r = d[0];
+      g = d[1];
+      b = d[2];
+    } else if (isBuiltInTable && embeddedCasinoCanvasRef.current) {
+      const c = embeddedCasinoCanvasRef.current;
+      const crect = c.getBoundingClientRect();
+      const cxRatio = (e.clientX - crect.left) / Math.max(1, crect.width);
+      const cyRatio = (e.clientY - crect.top) / Math.max(1, crect.height);
+      const cctx = c.getContext('2d');
+      if (!cctx) return;
+      const px = Math.min(c.width - 1, Math.max(0, Math.round(cxRatio * c.width)));
+      const py = Math.min(c.height - 1, Math.max(0, Math.round(cyRatio * c.height)));
+      const d = cctx.getImageData(px, py, 1, 1).data;
+      r = d[0];
+      g = d[1];
+      b = d[2];
+    } else {
+      return;
+    }
+
+    const hsv = rgbToHsv(r, g, b);
+    const updatedProfile = calibrateProfileFromPixel(
+      activePreset.hsvProfile,
+      eyedropperTarget,
+      r,
+      g,
+      b
+    );
+    onUpdatePreset({ ...activePreset, hsvProfile: updatedProfile });
+    setLastHsvSample(
+      `${eyedropperTarget}: H=${hsv.h.toFixed(0)}° S=${(hsv.s * 100).toFixed(0)}% V=${(
+        hsv.v * 100
+      ).toFixed(0)}%`
+    );
+    setEyedropperTarget(null);
+  };
+
+  const resetRoiToDefault = () => {
+    onChangeRoi(
+      isBuiltInTable && !hasStream
+        ? { leftRatio: 0.0145, topRatio: 0.232, widthRatio: 0.9708, heightRatio: 0.6786 }
+        : { leftRatio: 0.08, topRatio: 0.14, widthRatio: 0.84, heightRatio: 0.14 }
+    );
+  };
 
   if (!isOpen) return null;
 
@@ -247,6 +353,108 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
       : splitHeightPct === 56
       ? 'h-[450px]'
       : 'h-[540px]';
+
+  // For built-in table, the ROI overlay sits inside the top 112px strip canvas container so coordinates are 1:1
+  const renderRoiOverlay = () => (
+    <>
+      {showMira && (
+        <div
+          onPointerDown={(e) => startRoiDrag(e, 'move')}
+          style={{
+            left: `${roi.leftRatio * 100}%`,
+            top: `${roi.topRatio * 100}%`,
+            width: `${roi.widthRatio * 100}%`,
+            height: `${roi.heightRatio * 100}%`,
+          }}
+          className={`absolute z-20 border-2 border-dashed border-emerald-400 bg-emerald-500/10 ${
+            eyedropperTarget ? 'pointer-events-none' : 'cursor-move'
+          }`}
+        >
+          <div className="absolute -top-5 left-0 px-1.5 py-0.5 bg-emerald-600 text-[10px] font-mono text-white rounded-t flex items-center gap-1 whitespace-nowrap">
+            <Move className="w-2.5 h-2.5" />
+            Quadro OCR ({activePreset.expectedCells} cél.) {isOcrActive ? '· ATIVO' : ''}
+          </div>
+
+          {/* 4 Corner Handles */}
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'nw')}
+            className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nwse-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'ne')}
+            className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nesw-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'sw')}
+            className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nesw-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'se')}
+            className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nwse-resize"
+          />
+
+          {/* 4 Edge Handles for fine height/width stretching */}
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'n')}
+            className="absolute -top-1 left-1/2 -translate-x-1/2 w-8 h-2 bg-emerald-400/90 rounded-full cursor-ns-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 's')}
+            className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-8 h-2 bg-emerald-400/90 rounded-full cursor-ns-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'w')}
+            className="absolute top-1/2 -left-1 -translate-y-1/2 w-2 h-6 bg-emerald-400/90 rounded-full cursor-ew-resize"
+          />
+          <div
+            onPointerDown={(e) => startRoiDrag(e, 'e')}
+            className="absolute top-1/2 -right-1 -translate-y-1/2 w-2 h-6 bg-emerald-400/90 rounded-full cursor-ew-resize"
+          />
+        </div>
+      )}
+
+      {showDebugBoxes && lastFrameResult && lastFrameResult.allBoxes.length > 0 && (
+        <div
+          style={{
+            left: `${roi.leftRatio * 100}%`,
+            top: `${roi.topRatio * 100}%`,
+            width: `${roi.widthRatio * 100}%`,
+            height: `${roi.heightRatio * 100}%`,
+          }}
+          className="absolute z-25 pointer-events-none"
+        >
+          {lastFrameResult.allBoxes.map((box) => {
+            const leftPct =
+              lastFrameResult.roiWidth > 0
+                ? (box.x / lastFrameResult.roiWidth) * 100
+                : 0;
+            const widthPct =
+              lastFrameResult.roiWidth > 0
+                ? (box.width / lastFrameResult.roiWidth) * 100
+                : 8;
+            return (
+              <div
+                key={box.index}
+                style={{
+                  left: `${leftPct}%`,
+                  top: '8%',
+                  width: `${widthPct}%`,
+                  height: '84%',
+                }}
+                className={`absolute border ${
+                  box.number !== null ? 'border-sky-400/90' : 'border-red-500/80'
+                }`}
+              >
+                <span className="absolute -bottom-4 left-0 px-1 rounded bg-slate-950/90 font-mono text-[9px] text-sky-300 whitespace-nowrap">
+                  {box.number !== null ? `${box.number}` : '×'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <section
@@ -275,7 +483,6 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
           </button>
         </div>
 
-        {/* Address Bar */}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -289,7 +496,7 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
               type="text"
               value={addressInput}
               onChange={(e) => setAddressInput(e.target.value)}
-              placeholder="Digite https://... da casa de apostas ou mesa://europeia-ao-vivo"
+              placeholder="https://m.kwanzabet.ao ou mesa://europeia-ao-vivo"
               className="w-full bg-transparent text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
             />
           </div>
@@ -301,7 +508,6 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
           </button>
         </form>
 
-        {/* Browser Controls: OCR ON/OFF, Mira, Debug, Split %, External, Close */}
         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
           <button
             type="button"
@@ -318,8 +524,11 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
 
           <button
             type="button"
-            onClick={() => setShowMira((m) => !m)}
-            title="Calibração Visual da ROI (Mira)"
+            onClick={() => {
+              setShowMira((m) => !m);
+              setShowRoiPrecisionBar((r) => !r);
+            }}
+            title="Mostrar/Redirecionar Quadro OCR (Mira)"
             className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium cursor-pointer whitespace-nowrap ${
               showMira
                 ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
@@ -327,7 +536,7 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
             }`}
           >
             <Crosshair className="w-3.5 h-3.5" />
-            Mira
+            Quadro OCR
           </button>
 
           <button
@@ -344,7 +553,6 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
             Debug
           </button>
 
-          {/* 45% / 56% / 66% Split Height */}
           <div className="hidden sm:flex items-center border border-slate-700 rounded-lg overflow-hidden bg-slate-900">
             {([45, 56, 66] as SplitHeightPct[]).map((pct) => (
               <button
@@ -367,11 +575,11 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
               href={currentUrl}
               target="_blank"
               rel="noopener noreferrer"
-              title="Abrir site externo em nova aba (fallback Cloudflare)"
+              title="Abrir site em nova aba"
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs text-slate-200 whitespace-nowrap"
             >
               <ExternalLink className="w-3.5 h-3.5" />
-              Externo
+              Abrir Site
             </a>
           )}
 
@@ -386,232 +594,340 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
         </div>
       </div>
 
-      {/* Quick Bookmarks Strip */}
-      <div className="bg-[#0D131F] border-b border-slate-800/80 px-3 py-1.5 flex items-center gap-2 overflow-x-auto text-[11px]">
+      {/* Quick Bookmarks & Screen Stream Controls */}
+      <div className="bg-[#0D131F] border-b border-slate-800/80 px-3 py-1.5 flex flex-wrap items-center gap-2 text-[11px]">
         <button
           type="button"
           onClick={() => navigateToUrl(BUILTIN_TABLE_URL)}
           className={`px-2 py-0.5 rounded border whitespace-nowrap cursor-pointer ${
-            isBuiltInTable
+            isBuiltInTable && !hasStream
               ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300 font-medium'
               : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
           }`}
         >
-          Mesa Integrada (Apostas &amp; Leitura Direta)
+          Mesa Integrada
         </button>
 
-        {recentBookmarks.map((bm) => (
-          <button
-            key={bm}
-            type="button"
-            onClick={() => navigateToUrl(bm)}
-            className={`px-2 py-0.5 rounded border whitespace-nowrap max-w-[200px] truncate cursor-pointer ${
-              currentUrl === bm
-                ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
-                : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {bm.replace(/^https?:\/\//, '')}
-          </button>
-        ))}
+        <button
+          type="button"
+          onClick={() => navigateToUrl(KWANZABET_URL)}
+          className={`px-2 py-0.5 rounded border whitespace-nowrap cursor-pointer ${
+            currentUrl.startsWith(KWANZABET_URL)
+              ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300 font-medium'
+              : 'border-slate-800 bg-slate-900 text-slate-300 hover:text-white'
+          }`}
+        >
+          m.kwanzabet.ao
+        </button>
 
-        {!isBuiltInTable && (
-          <button
-            type="button"
-            onClick={() => void onStartExternalScreenCapture()}
-            className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded border border-sky-600/60 bg-sky-500/10 text-sky-300 whitespace-nowrap cursor-pointer"
-          >
-            <Camera className="w-3 h-3" />
-            {hasScreenStream ? 'Captura de Aba/Janela Ativa' : 'Capturar Pixels desta Aba/Janela'}
-          </button>
-        )}
+        {recentBookmarks
+          .filter((bm) => bm !== KWANZABET_URL)
+          .map((bm) => (
+            <button
+              key={bm}
+              type="button"
+              onClick={() => navigateToUrl(bm)}
+              className={`px-2 py-0.5 rounded border whitespace-nowrap max-w-[180px] truncate cursor-pointer ${
+                currentUrl === bm
+                  ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
+                  : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {bm.replace(/^https?:\/\//, '')}
+            </button>
+          ))}
+
+        <div className="ml-auto flex items-center gap-2">
+          {!hasStream ? (
+            <button
+              type="button"
+              onClick={() => void onStartExternalScreenCapture()}
+              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded border border-sky-600/70 bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-medium whitespace-nowrap cursor-pointer"
+            >
+              <Camera className="w-3 h-3" />
+              Capturar Aba/Janela do KwanzaBet
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onStopScreenCapture}
+              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded border border-red-600/70 bg-red-500/15 hover:bg-red-500/25 text-red-300 font-medium whitespace-nowrap cursor-pointer"
+            >
+              Parar Stream de Captura
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* FrameLayout Viewport (Browser Content + ProgressBar + Error Bar + ROI Overlay + DebugBoxesView) */}
+      {/* Main Browser / Live Stream Viewport */}
       <div
         ref={viewportRef}
         onPointerMove={handlePointerMove}
         onPointerUp={endRoiDrag}
-        className={`relative w-full ${viewportHeightClass} bg-[#0B0F17] overflow-hidden`}
+        onPointerCancel={endRoiDrag}
+        onClick={handleEyedropperClick}
+        className={`relative w-full ${viewportHeightClass} bg-[#0B0F17] overflow-hidden select-none ${
+          eyedropperTarget ? 'cursor-crosshair' : ''
+        }`}
       >
-        {/* Thin ProgressBar */}
-        {isLoadingExternal && (
+        {/* Thin loading bar */}
+        {isLoadingExternal && !hasStream && (
           <div className="absolute top-0 left-0 right-0 z-30 h-0.5 bg-slate-800 overflow-hidden">
             <div className="h-full w-1/2 bg-emerald-400 animate-pulse" />
           </div>
         )}
 
-        {/* Friendly Error / Fallback Bar for External Sites */}
-        {!isBuiltInTable && externalErrorMsg && (
-          <div className="absolute top-2 left-2 right-2 z-30 bg-slate-950/95 border border-amber-700/70 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-200">
-            <span>{externalErrorMsg}</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleReload}
-                className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-100 cursor-pointer"
-              >
-                Recarregar
-              </button>
-              <a
-                href={currentUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
-              >
-                Abrir Externo
-              </a>
-              <button
-                type="button"
-                onClick={() => void onStartExternalScreenCapture()}
-                className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white cursor-pointer"
-              >
-                Capturar Janela (OCR)
-              </button>
+        {/* Live Screen Capture Video Feed (Aspect-matched so ROI maps 1:1 to video pixels) */}
+        {hasStream ? (
+          <div className="w-full h-full bg-black flex items-center justify-center p-1">
+            <div
+              className="relative max-w-full max-h-full h-full flex items-center justify-center"
+              style={{ aspectRatio: `${videoAspectRatio}` }}
+            >
+              <video
+                ref={browserVideoRef}
+                autoPlay
+                muted
+                playsInline
+                onLoadedMetadata={(e) => {
+                  const v = e.currentTarget;
+                  if (v.videoWidth > 0 && v.videoHeight > 0) {
+                    setVideoAspectRatio(v.videoWidth / v.videoHeight);
+                  }
+                }}
+                onResize={(e) => {
+                  const v = e.currentTarget;
+                  if (v.videoWidth > 0 && v.videoHeight > 0) {
+                    setVideoAspectRatio(v.videoWidth / v.videoHeight);
+                  }
+                }}
+                className="w-full h-full object-fill bg-black rounded border border-slate-800"
+              />
+              {renderRoiOverlay()}
             </div>
           </div>
-        )}
-
-        {/* Content Layer: Built-in Interactive Casino Table OR External Iframe */}
-        {isBuiltInTable ? (
-          <EmbeddedLiveCasinoTable
-            activePreset={activePreset}
-            currency={currency}
-            casinoCanvasRef={embeddedCasinoCanvasRef}
-            onBetSettled={onBetSettled}
-          />
-        ) : (
-          <div className="w-full h-full relative bg-[#0B0F17]">
-            <iframe
-              key={`${currentUrl}_${reloadNonce}`}
-              src={currentUrl}
-              title="Navegador Embutido RoletaLab"
-              referrerPolicy="no-referrer"
-              onLoad={() => setIsLoadingExternal(false)}
-              onError={() => {
-                setIsLoadingExternal(false);
-                setExternalErrorMsg(
-                  'Este site bloqueou incorporação direta (X-Frame-Options / Cloudflare). Abra em aba externa e ative a Captura OCR.'
-                );
-              }}
-              className="w-full h-full border-0 bg-[#0B0F17]"
+        ) : isBuiltInTable ? (
+          <div className="relative w-full h-full">
+            <EmbeddedLiveCasinoTable
+              activePreset={activePreset}
+              currency={currency}
+              casinoCanvasRef={embeddedCasinoCanvasRef}
+              onBetSettled={onBetSettled}
+              roiOverlaySlot={renderRoiOverlay()}
             />
-
-            {/* Subtle info strip at bottom of external iframe explaining Screen Capture fallback */}
-            <div className="absolute bottom-2 right-2 z-20 flex items-center gap-2 bg-slate-950/90 border border-slate-800 rounded-lg px-3 py-1.5 text-[11px] text-slate-300">
-              <span>Se o site ficar branco (Cloudflare/X-Frame), abra em</span>
-              <a
-                href={currentUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-emerald-400 underline font-medium"
-              >
-                Nova Aba
-              </a>
-              <span>e clique em</span>
-              <button
-                type="button"
-                onClick={() => void onStartExternalScreenCapture()}
-                className="text-sky-400 underline font-medium cursor-pointer"
-              >
-                Capturar Janela
-              </button>
-            </div>
-
-            {/* Info indicator when capturing external window/tab */}
-            {hasScreenStream && (
-              <div className="absolute top-2 right-2 z-20 px-2.5 py-1 rounded bg-emerald-600/90 text-[11px] font-mono text-white">
-                OCR Externo Ativo
+          </div>
+        ) : (
+          <div className="relative w-full h-full bg-[#0B0F17] flex flex-col">
+            {/* Persistent, dismissible action bar for X-Frame-Options blocked sites like m.kwanzabet.ao */}
+            {externalNotice && (
+              <div className="z-30 bg-slate-950/95 border-b border-amber-600/70 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-amber-200 leading-snug flex-1 min-w-[240px]">
+                  {externalNotice}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    href={currentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    1. Abrir {currentUrl.replace(/^https?:\/\//, '')} em Nova Aba
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void onStartExternalScreenCapture()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white cursor-pointer whitespace-nowrap"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    2. Capturar Aba para OCR ao Vivo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleReload}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs text-slate-200 cursor-pointer whitespace-nowrap"
+                  >
+                    Recarregar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExternalNotice(null)}
+                    title="Ocultar aviso"
+                    className="p-1 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             )}
-          </div>
-        )}
 
-        {/* ROI Overlay (Green Dashed Box with 4 draggable corners) */}
-        {showMira && (
-          <div
-            onPointerDown={isBuiltInTable ? undefined : (e) => startRoiDrag(e, 'move')}
-            style={{
-              left: `${overlayRoi.leftRatio * 100}%`,
-              top: `${overlayRoi.topRatio * 100}%`,
-              width: `${overlayRoi.widthRatio * 100}%`,
-              height: `${overlayRoi.heightRatio * 100}%`,
-            }}
-            className={`absolute z-20 border-2 border-dashed border-emerald-400 bg-emerald-500/5 pointer-events-auto ${
-              isBuiltInTable ? 'pointer-events-none' : 'cursor-move'
-            }`}
-          >
-            <div className="absolute -top-5 left-0 px-1.5 py-0.5 bg-emerald-600 text-[10px] font-mono text-white rounded-t whitespace-nowrap">
-              ROI {isOcrActive ? '· OCR ATIVO' : '· MIRA'}
+            <div className="relative flex-1 w-full">
+              <iframe
+                key={`${currentUrl}_${reloadNonce}`}
+                src={currentUrl}
+                title="Navegador Embutido RoletaLab"
+                referrerPolicy="no-referrer"
+                onLoad={() => setIsLoadingExternal(false)}
+                onError={() => {
+                  setIsLoadingExternal(false);
+                  setExternalNotice(
+                    'Este site bloqueou incorporação em iframe (X-Frame-Options / Cloudflare). Abra em Nova Aba e clique em "Capturar Aba para OCR ao Vivo".'
+                  );
+                }}
+                className="w-full h-full border-0 bg-[#0B0F17]"
+              />
+              {renderRoiOverlay()}
             </div>
-
-            {!isBuiltInTable && (
-              <>
-                <div
-                  onPointerDown={(e) => startRoiDrag(e, 'nw')}
-                  className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nwse-resize"
-                />
-                <div
-                  onPointerDown={(e) => startRoiDrag(e, 'ne')}
-                  className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nesw-resize"
-                />
-                <div
-                  onPointerDown={(e) => startRoiDrag(e, 'sw')}
-                  className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nesw-resize"
-                />
-                <div
-                  onPointerDown={(e) => startRoiDrag(e, 'se')}
-                  className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-emerald-400 border border-slate-950 rounded-sm cursor-nwse-resize"
-                />
-              </>
-            )}
-          </div>
-        )}
-
-        {/* DebugBoxesView Overlay */}
-        {showDebugBoxes && lastFrameResult && lastFrameResult.allBoxes.length > 0 && (
-          <div
-            style={{
-              left: `${overlayRoi.leftRatio * 100}%`,
-              top: `${overlayRoi.topRatio * 100}%`,
-              width: `${overlayRoi.widthRatio * 100}%`,
-              height: `${overlayRoi.heightRatio * 100}%`,
-            }}
-            className="absolute z-25 pointer-events-none"
-          >
-            {lastFrameResult.allBoxes.map((box) => {
-              const leftPct =
-                lastFrameResult.roiWidth > 0
-                  ? (box.x / lastFrameResult.roiWidth) * 100
-                  : 0;
-              const widthPct =
-                lastFrameResult.roiWidth > 0
-                  ? (box.width / lastFrameResult.roiWidth) * 100
-                  : 8;
-              return (
-                <div
-                  key={box.index}
-                  style={{
-                    left: `${leftPct}%`,
-                    top: '8%',
-                    width: `${widthPct}%`,
-                    height: '84%',
-                  }}
-                  className={`absolute border ${
-                    box.number !== null
-                      ? 'border-sky-400/90'
-                      : 'border-red-500/80'
-                  }`}
-                >
-                  <span className="absolute -bottom-4 left-0 px-1 rounded bg-slate-950/90 font-mono text-[9px] text-sky-300 whitespace-nowrap">
-                    {box.number !== null ? `${box.number}` : '×'}
-                  </span>
-                </div>
-              );
-            })}
           </div>
         )}
       </div>
+
+      {/* Precision ROI Redirect / Resize & HSV Eyedropper Bar */}
+      {showRoiPrecisionBar && (
+        <div className="bg-[#0E1420] border-t border-slate-800 px-3 py-2 flex flex-wrap items-center gap-3 text-[11px]">
+          <span className="font-semibold text-emerald-400 flex items-center gap-1 whitespace-nowrap">
+            <Move className="w-3.5 h-3.5" />
+            Redirecionar Quadro OCR:
+          </span>
+
+          <label className="flex items-center gap-1.5 text-slate-300">
+            <span>X:</span>
+            <input
+              type="range"
+              min={0}
+              max={95}
+              step={0.5}
+              value={Number((roi.leftRatio * 100).toFixed(1))}
+              onChange={(e) => {
+                const left = Number(e.target.value) / 100;
+                onChangeRoi({
+                  ...roi,
+                  leftRatio: Math.max(0, Math.min(1 - roi.widthRatio, left)),
+                });
+              }}
+              className="w-20 accent-emerald-500"
+            />
+            <span className="font-mono w-9">
+              {(roi.leftRatio * 100).toFixed(0)}%
+            </span>
+          </label>
+
+          <label className="flex items-center gap-1.5 text-slate-300">
+            <span>Y:</span>
+            <input
+              type="range"
+              min={0}
+              max={95}
+              step={0.5}
+              value={Number((roi.topRatio * 100).toFixed(1))}
+              onChange={(e) => {
+                const top = Number(e.target.value) / 100;
+                onChangeRoi({
+                  ...roi,
+                  topRatio: Math.max(0, Math.min(1 - roi.heightRatio, top)),
+                });
+              }}
+              className="w-20 accent-emerald-500"
+            />
+            <span className="font-mono w-9">
+              {(roi.topRatio * 100).toFixed(0)}%
+            </span>
+          </label>
+
+          <label className="flex items-center gap-1.5 text-slate-300">
+            <span>Larg:</span>
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={0.5}
+              value={Number((roi.widthRatio * 100).toFixed(1))}
+              onChange={(e) => {
+                const w = Number(e.target.value) / 100;
+                onChangeRoi({
+                  ...roi,
+                  widthRatio: Math.min(1 - roi.leftRatio, w),
+                });
+              }}
+              className="w-20 accent-emerald-500"
+            />
+            <span className="font-mono w-9">
+              {(roi.widthRatio * 100).toFixed(0)}%
+            </span>
+          </label>
+
+          <label className="flex items-center gap-1.5 text-slate-300">
+            <span>Alt:</span>
+            <input
+              type="range"
+              min={5}
+              max={95}
+              step={0.5}
+              value={Number((roi.heightRatio * 100).toFixed(1))}
+              onChange={(e) => {
+                const h = Number(e.target.value) / 100;
+                onChangeRoi({
+                  ...roi,
+                  heightRatio: Math.min(1 - roi.topRatio, h),
+                });
+              }}
+              className="w-20 accent-emerald-500"
+            />
+            <span className="font-mono w-9">
+              {(roi.heightRatio * 100).toFixed(0)}%
+            </span>
+          </label>
+
+          <label className="flex items-center gap-1 text-slate-300">
+            <span>Células:</span>
+            <input
+              type="number"
+              min={4}
+              max={20}
+              value={activePreset.expectedCells}
+              onChange={(e) =>
+                onUpdatePreset({
+                  ...activePreset,
+                  expectedCells: Math.max(4, Math.min(20, Number(e.target.value) || 12)),
+                })
+              }
+              className="w-12 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-slate-100"
+            />
+          </label>
+
+          <button
+            type="button"
+            onClick={resetRoiToDefault}
+            className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 cursor-pointer whitespace-nowrap"
+          >
+            Centralizar ROI
+          </button>
+
+          {/* Compact HSV Eyedropper right inside Browser bar */}
+          <div className="flex items-center gap-1 ml-auto">
+            <Pipette className="w-3.5 h-3.5 text-slate-400" />
+            {(['GREEN', 'RED', 'BLACK'] as RouletteColor[]).map((col) => (
+              <button
+                key={col}
+                type="button"
+                onClick={() => setEyedropperTarget(eyedropperTarget === col ? null : col)}
+                className={`px-1.5 py-0.5 rounded border text-[10px] cursor-pointer ${
+                  eyedropperTarget === col
+                    ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                    : 'border-slate-700 bg-slate-900 text-slate-300'
+                }`}
+              >
+                {col === 'GREEN' ? 'V0' : col === 'RED' ? 'Verm' : 'Preto'}
+              </button>
+            ))}
+            {lastHsvSample && (
+              <span className="font-mono text-[10px] text-emerald-400 hidden xl:inline">
+                {lastHsvSample}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   );
 };

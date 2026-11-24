@@ -50,6 +50,7 @@ import {
   CurrencyCode,
   OCRFrameResult,
   ReconciliationEvent,
+  ROIRect,
   SessionRecord,
   SpinEntry,
 } from './types/roulette';
@@ -95,8 +96,16 @@ export default function App() {
   const [isBrowserOpen, setIsBrowserOpen] = useState(true);
   const [isEmbeddedBuiltInTable, setIsEmbeddedBuiltInTable] = useState(true);
   const [isEmbeddedOcrOn, setIsEmbeddedOcrOn] = useState(true);
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+  const [builtInRoi, setBuiltInRoi] = useState<ROIRect>({
+    leftRatio: 0.0145,
+    topRatio: 0.232,
+    widthRatio: 0.9708,
+    heightRatio: 0.6786,
+  });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const browserVideoRef = useRef<HTMLVideoElement | null>(null);
   const syntheticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const embeddedCasinoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -359,16 +368,19 @@ export default function App() {
       });
 
       mediaStreamRef.current = stream;
+      setMediaStream(stream);
       setCaptureMode('screen');
       setIsCapturing(true);
+      setIsEmbeddedOcrOn(true);
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        await videoRef.current.play().catch(() => {});
       }
 
       stream.getVideoTracks()[0]?.addEventListener('ended', () => {
         setIsCapturing(false);
+        setMediaStream(null);
         mediaStreamRef.current = null;
       });
     } catch (err) {
@@ -382,6 +394,7 @@ export default function App() {
 
   const handleStopCapture = () => {
     setIsCapturing(false);
+    setMediaStream(null);
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       mediaStreamRef.current = null;
@@ -389,30 +402,46 @@ export default function App() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    if (browserVideoRef.current) {
+      browserVideoRef.current.srcObject = null;
+    }
   };
 
   // Non-blocking 375ms OCR loop for Screen Capture OR Embedded Split-Screen Browser
   useEffect(() => {
     const shouldPollEmbedded =
-      activeTab === 'live' && isBrowserOpen && isEmbeddedOcrOn && isEmbeddedBuiltInTable;
+      activeTab === 'live' &&
+      isBrowserOpen &&
+      isEmbeddedOcrOn &&
+      isEmbeddedBuiltInTable &&
+      !mediaStream;
     if (!isCapturing && !shouldPollEmbedded) return;
 
     const timer = window.setInterval(() => {
       if (isCapturing) {
-        const src =
-          captureMode === 'screen' ? videoRef.current : syntheticCanvasRef.current;
+        const pausedInBrowser =
+          activeTab === 'live' && isBrowserOpen && !isEmbeddedOcrOn;
+        if (pausedInBrowser) return;
+
+        let src: HTMLVideoElement | HTMLCanvasElement | null = null;
+        if (captureMode === 'screen') {
+          src =
+            activeTab === 'live' &&
+            isBrowserOpen &&
+            browserVideoRef.current &&
+            browserVideoRef.current.videoWidth > 0
+              ? browserVideoRef.current
+              : videoRef.current;
+        } else {
+          src = syntheticCanvasRef.current;
+        }
         if (src) {
           void handleProcessSourceFrame(src, false);
         }
       } else if (shouldPollEmbedded && embeddedCasinoCanvasRef.current) {
         const builtInPreset: CasinoLayoutPreset = {
           ...activePreset,
-          roi: {
-            leftRatio: 0.0145,
-            topRatio: 0.232,
-            widthRatio: 0.9708,
-            heightRatio: 0.6786,
-          },
+          roi: builtInRoi,
         };
         void handleProcessSourceFrame(
           embeddedCasinoCanvasRef.current,
@@ -426,17 +455,19 @@ export default function App() {
   }, [
     activePreset,
     activeTab,
+    builtInRoi,
     captureMode,
     handleProcessSourceFrame,
     isBrowserOpen,
     isCapturing,
     isEmbeddedBuiltInTable,
     isEmbeddedOcrOn,
+    mediaStream,
   ]);
 
   const handleToggleEmbeddedOcr = () => {
-    if (!isEmbeddedBuiltInTable && !isCapturing) {
-      // External URL in iframe: start getDisplayMedia capture so real pixels can be read
+    if (!isEmbeddedBuiltInTable && !mediaStream) {
+      // External URL without active stream: prompt getDisplayMedia capture so real pixels can be read
       void handleStartScreenCapture();
       return;
     }
@@ -724,14 +755,29 @@ export default function App() {
               onClose={() => setIsBrowserOpen(false)}
               activePreset={activePreset}
               currency={bankroll.currency}
-              isOcrActive={isEmbeddedBuiltInTable ? isEmbeddedOcrOn : isCapturing}
+              isOcrActive={
+                mediaStream
+                  ? isCapturing && isEmbeddedOcrOn
+                  : isEmbeddedBuiltInTable
+                  ? isEmbeddedOcrOn
+                  : isCapturing
+              }
               onToggleOcr={handleToggleEmbeddedOcr}
               onStartExternalScreenCapture={handleStartScreenCapture}
+              onStopScreenCapture={handleStopCapture}
               onUpdatePreset={handleUpdatePreset}
+              roi={isEmbeddedBuiltInTable && !mediaStream ? builtInRoi : activePreset.roi}
+              onChangeRoi={(nextRoi) => {
+                if (isEmbeddedBuiltInTable && !mediaStream) {
+                  setBuiltInRoi(nextRoi);
+                } else {
+                  handleUpdatePreset({ ...activePreset, roi: nextRoi });
+                }
+              }}
               lastFrameResult={lastFrameResult}
               embeddedCasinoCanvasRef={embeddedCasinoCanvasRef}
-              screenVideoRef={videoRef}
-              hasScreenStream={isCapturing && captureMode === 'screen'}
+              browserVideoRef={browserVideoRef}
+              mediaStream={mediaStream}
               onUrlModeChange={setIsEmbeddedBuiltInTable}
               onBetSettled={handleEmbeddedBetSettled}
             />
