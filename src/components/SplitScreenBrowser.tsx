@@ -100,6 +100,7 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
   const [eyedropperTarget, setEyedropperTarget] = useState<RouletteColor | null>(null);
   const [lastHsvSample, setLastHsvSample] = useState<string | null>(null);
   const [videoAspectRatio, setVideoAspectRatio] = useState<number>(16 / 9);
+  const [proxyAvailable, setProxyAvailable] = useState<boolean>(false);
 
   const [recentBookmarks, setRecentBookmarks] = useState<string[]>(() => {
     try {
@@ -146,7 +147,25 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
     }
   }, [mediaStream, browserVideoRef, isBuiltInTable]);
 
-  // Show helpful fallback notice when navigating to external casino URLs
+  // Detect whether the Express same-origin browser proxy (/api/proxy-status) is active
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/proxy-status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { enabled?: boolean } | null) => {
+        if (!cancelled && data?.enabled) {
+          setProxyAvailable(true);
+        }
+      })
+      .catch(() => {
+        // Static/offline APK build without Express proxy
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Show helpful fallback notice when running without backend proxy on external URLs
   useEffect(() => {
     if (isBuiltInTable || hasStream) {
       setIsLoadingExternal(false);
@@ -176,7 +195,9 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
     if (safe !== BUILTIN_TABLE_URL) {
       setIsLoadingExternal(true);
       setExternalNotice(
-        'Casas de apostas (como m.kwanzabet.ao) costumam bloquear iframes em navegadores desktop via X-Frame-Options/Cloudflare. Se não carregar abaixo, use os 2 passos ao lado.'
+        proxyAvailable
+          ? null
+          : 'Modo estático sem proxy: se o site bloquear o iframe, use os 2 passos abaixo.'
       );
       setRecentBookmarks((prev) => {
         const next = [safe, ...prev.filter((u) => u !== safe)].slice(0, 5);
@@ -762,20 +783,34 @@ export const SplitScreenBrowser: React.FC<SplitScreenBrowserProps> = ({
             )}
 
             <div className="relative flex-1 w-full">
-              <iframe
-                key={`${currentUrl}_${reloadNonce}`}
-                src={currentUrl}
-                title="Navegador Embutido RoletaLab"
-                referrerPolicy="no-referrer"
-                onLoad={() => setIsLoadingExternal(false)}
-                onError={() => {
-                  setIsLoadingExternal(false);
-                  setExternalNotice(
-                    'Este site bloqueou incorporação em iframe (X-Frame-Options / Cloudflare). Abra em Nova Aba e clique em "Capturar Aba para OCR ao Vivo".'
-                  );
-                }}
-                className="w-full h-full border-0 bg-[#0B0F17]"
-              />
+              {(() => {
+                let iframeSrc = currentUrl;
+                if (proxyAvailable) {
+                  try {
+                    const parsed = new URL(currentUrl);
+                    const proto = parsed.protocol.replace(':', '');
+                    iframeSrc = `/browse/${proto}/${parsed.host}${parsed.pathname}${parsed.search}`;
+                  } catch {
+                    iframeSrc = currentUrl;
+                  }
+                }
+                return (
+                  <iframe
+                    key={`${iframeSrc}_${reloadNonce}`}
+                    src={iframeSrc}
+                    title="Navegador Embutido RoletaLab"
+                    referrerPolicy={proxyAvailable ? 'same-origin' : 'no-referrer'}
+                    onLoad={() => setIsLoadingExternal(false)}
+                    onError={() => {
+                      setIsLoadingExternal(false);
+                      setExternalNotice(
+                        'Não foi possível abrir diretamente aqui. Abra em Nova Aba e clique em "Capturar Aba para OCR ao Vivo".'
+                      );
+                    }}
+                    className="w-full h-full border-0 bg-[#0B0F17]"
+                  />
+                );
+              })()}
               {renderRoiOverlay()}
             </div>
           </div>
